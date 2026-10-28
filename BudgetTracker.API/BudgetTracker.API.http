@@ -1,3 +1,47 @@
 @BudgetTracker.API_HostAddress = http://localhost:5166
 
-###
+### 1. Valid budget -> expect 200 OK with Spent and Remaining filled in
+POST {{BudgetTracker.API_HostAddress}}/api/budgets
+Content-Type: application/json
+
+{
+  "name": "Groceries",
+  "limit": 400.00,
+  "expenses": [
+    { "amount": 52.75, "description": "Costco run", "date": "2026-10-20" },
+    { "amount": 18.40, "description": "Farmers market" }
+  ]
+}
+
+### 2. Over the limit -> expect 400 BudgetExceededException
+POST {{BudgetTracker.API_HostAddress}}/api/budgets
+Content-Type: application/json
+
+{
+  "name": "Dining out",
+  "limit": 50.00,
+  "expenses": [
+    { "amount": 30.00, "description": "Tacos" },
+    { "amount": 25.00, "description": "Sushi" }
+  ]
+}
+
+### 3. Negative amount -> expect 400 InvalidAmountException
+POST {{BudgetTracker.API_HostAddress}}/api/budgets
+Content-Type: application/json
+
+{
+  "name": "Gas",
+  "limit": 100.00,
+  "expenses": [
+    { "amount": -10.00, "description": "Refund?" }
+  ]
+}
+
+### 4. Missing name -> expect 400 from [ApiController], before our code runs
+POST {{BudgetTracker.API_HostAddress}}/api/budgets
+Content-Type: application/json
+
+{
+  "limit": 100.00
+}
