@@ -22,6 +22,20 @@ public sealed class Budget : AggregateRoot<Guid>
         Limit = limit;
     }
 
+
+    // second internal constructor: rebuilds a SAVED budget with its saved expenses.
+    // used by the Data project when loading (allowed by InternalsVisibleTo).
+    // no rules here on purpose: this data already passed the rules when it was first created.
+    internal Budget(Guid id, string name, Money limit, IEnumerable<Expense> expenses)
+        : this(id, name, limit)   // reuse the first constructor to set Id, Name, Limit
+    {
+        // put the saved expenses back into the private list.
+        _expenses.AddRange(expenses);
+
+        // work out Spent again by adding up every expense, starting from $0.
+        Spent = _expenses.Aggregate(Money.Zero, (total, expense) => total.Add(expense.Amount));
+    }
+    
     // public get, private set: anyone can read, only this class can change.
     public string Name { get; private set; }
 
