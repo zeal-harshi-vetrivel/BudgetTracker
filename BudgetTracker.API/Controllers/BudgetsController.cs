@@ -70,4 +70,43 @@ public sealed class BudgetsController(IBudgetRepository repository) : Controller
 
         return Ok(BudgetResponse.From(budget));
     }
+
+    
+    // POST /api/budgets/{id}/expenses
+    // loads a SAVED budget, adds one expense through the Domain, and saves it again.
+    [HttpPost("{id:guid}/expenses")]
+    public async Task<ActionResult<BudgetResponse>> AddExpense(
+        Guid id,
+        [FromBody] CreateExpenseRequest request,
+        CancellationToken cancellationToken)
+    {
+        // rebuild the budget from the database.
+        Budget? budget = await repository.Get(id, cancellationToken);
+
+        // no budget with that Id: 404 Not Found.
+        if (budget is null)
+            return NotFound();
+
+        try
+        {
+            // if the client didn't send a date, use today.
+            DateOnly date = request.Date ?? DateOnly.FromDateTime(DateTime.Today);
+
+            // same Domain method as POST /api/budgets, so the same rules apply to a loaded budget.
+            budget.AddExpense(request.Amount, request.Description, date);
+        }
+        catch (DomainException ex)
+        {
+            // a rule was broken (e.g. over the limit). Nothing gets saved.
+            return Problem(
+                title: ex.GetType().Name,
+                detail: ex.Message,
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
+        // rules passed: save. The budget already exists, so this takes the "update" path in Save.
+        await repository.Save(budget, cancellationToken);
+
+        return Ok(BudgetResponse.From(budget));
+    }
 }
