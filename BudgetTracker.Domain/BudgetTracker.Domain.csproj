@@ -6,4 +6,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- lets the Data project call our internal constructors to rebuild objects loaded from the database -->
+    <InternalsVisibleTo Include="BudgetTracker.Data" />
+  </ItemGroup>
+
 </Project>
