@@ -1,6 +1,8 @@
 @BudgetTracker.API_HostAddress = http://localhost:5166
 
-### 1. Valid budget -> expect 200 OK with Spent and Remaining filled in
+### 1. Valid budget -> expect 201 Created with Spent and Remaining filled in
+# @name createBudget
+
 POST {{BudgetTracker.API_HostAddress}}/api/budgets
 Content-Type: application/json
 
@@ -45,3 +47,10 @@ Content-Type: application/json
 {
   "limit": 100.00
 }
+
+### 5. Get the budget from request 1 -> expect 200 with the same data
+# uses the id from request 1's response, so send request 1 first
+GET {{BudgetTracker.API_HostAddress}}/api/budgets/{{createBudget.response.body.$.id}}
+
+### 6. Unknown id -> expect 404 Not Found
+GET {{BudgetTracker.API_HostAddress}}/api/budgets/00000000-0000-0000-0000-000000000000
