@@ -2,7 +2,7 @@
 
 A budget tracking API built for the Zeal API Design Bootcamp. Users create spending budgets with a limit and record expenses against them. The domain enforces the spending rules.
 
-**Status:** Weeks 1–2 complete · Week 3 domain layer complete, endpoint in progress
+**Status:** Weeks 1–5 complete · Week 6 (stabilize) in progress
 
 ---
 
@@ -49,9 +49,9 @@ People often set a monthly spending limit (for example, $400 for groceries) but 
 | Project | Responsibility |
 |---|---|
 | `BudgetTracker.API` | HTTP endpoints, request/response models, startup |
-| `BudgetTracker.Application` | Use cases (commands, queries, handlers). Empty until Week 7. |
+| `BudgetTracker.Application` | Interfaces the Data layer implements (`IBudgetRepository`). Commands and queries come in Weeks 7–8. |
 | `BudgetTracker.Domain` | Business concepts, rules and behavior |
-| `BudgetTracker.Data` | Database access. Empty until Week 5. |
+| `BudgetTracker.Data` | Database access with EF Core and SQLite |
 
 ### References
 
@@ -67,7 +67,7 @@ API → Application → Domain ← Data
 
 ---
 
-## Week 3: Domain layer (DDD) 🟡
+## Week 3: Domain layer (DDD) ✅
 
 | Task | Status | Where |
 |---|---|---|
@@ -76,7 +76,7 @@ API → Application → Domain ← Data
 | Methods named after business actions | ✅ | `Budget.Create`, `Budget.AddExpense` |
 | At least one business invariant in the Domain layer | ✅ | No negative or zero amounts; no spending past the limit |
 | Create a `DomainException` and throw it when a rule is broken | ✅ | `DomainException` base, plus `InvalidAmountException` and `BudgetExceededException` |
-| Add a basic controller and endpoint that exercises the domain | ⬜ Not started | Next: `POST /api/budgets` |
+| Add a basic controller and endpoint that exercises the domain | ✅ | `POST /api/budgets` in `BudgetsController` (Week 4) |
 
 ### Instructor checklist (from the Week 3 session)
 
@@ -87,7 +87,7 @@ API → Application → Domain ← Data
 | Public getters, private setters | ✅ | `Budget`, `Expense` |
 | At least one method that changes the object, with validation | ✅ | `Budget.AddExpense` |
 | Custom domain exception | ✅ | `InvalidAmountException`, `BudgetExceededException` |
-| One endpoint that calls the domain model | ⬜ | Not started |
+| One endpoint that calls the domain model | ✅ | `POST /api/budgets` |
 
 ### Domain structure
 
@@ -114,13 +114,6 @@ BudgetTracker.Domain/
 - **`Money` value object instead of `decimal`.** A negative amount can't exist anywhere in the domain.
 - **Named exceptions.** Each rule throws an exception named after it, rather than a generic `ArgumentException`.
 - **Classes are `sealed`.** This follows the D&D example repo, so finished classes can't be subclassed to bypass the rules.
-
-### Remaining Week 3 work
-
-1. Clean up `Program.cs`: remove the weather template and add controllers.
-2. Add request and response models (`CreateBudgetRequest`, `BudgetResponse`).
-3. Add `BudgetsController` with `POST /api/budgets`. Catch `DomainException` and return 400.
-4. Test a valid request and two rule violations with the `.http` file.
 
 ---
 
