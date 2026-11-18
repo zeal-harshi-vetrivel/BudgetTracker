@@ -1,4 +1,6 @@
+using BudgetTracker.Application.Data.Queries;       // IBudgetQueries
 using BudgetTracker.Application.Data.Repositories;   // IBudgetRepository
+using BudgetTracker.Data.Queries;                    // BudgetQueries
 using BudgetTracker.Data.Repositories;               // BudgetRepository
 using Microsoft.EntityFrameworkCore;                 // UseSqlite, Migrate
 using Microsoft.Extensions.DependencyInjection;      // IServiceCollection, AddScoped
@@ -23,6 +25,9 @@ public static class ServiceCollectionExtensions
         // Scoped = one per HTTP request (same lifetime as the DbContext).
         services.AddScoped<IBudgetRepository, BudgetRepository>();
 
+        // read side: whenever something asks for IBudgetQueries, create a BudgetQueries.
+        services.AddScoped<IBudgetQueries, BudgetQueries>();
+
         return services;
     }
 
@@ -35,4 +40,4 @@ public static class ServiceCollectionExtensions
         // run any migrations that haven't been applied yet.
         scope.ServiceProvider.GetRequiredService<BudgetTrackerContext>().Database.Migrate();
     }
-}
+}

@@ -1,4 +1,5 @@
-using BudgetTracker.Domain.Budgets;   // so we can read Budget and Expense in From()
+using BudgetTracker.Application.Budgets.Queries;   // BudgetDetails, ExpenseDetails (read models)
+using BudgetTracker.Domain.Budgets;                // so we can read Budget and Expense in From()
 
 namespace BudgetTracker.API.Contracts.Responses;
 
@@ -31,6 +32,17 @@ public sealed class BudgetResponse
         // turn each Expense into an ExpenseResponse, then collect them into a list
         Expenses = budget.Expenses.Select(ExpenseResponse.From).ToList()
     };
+
+    // turns a read model (from a query) into this response. Same JSON shape as above.
+    public static BudgetResponse From(BudgetDetails budget) => new()
+    {
+        Id = budget.Id,
+        Name = budget.Name,
+        Limit = budget.Limit,           // already plain decimals, no Money to unwrap
+        Spent = budget.Spent,
+        Remaining = budget.Remaining,
+        Expenses = budget.Expenses.Select(ExpenseResponse.From).ToList()
+    };
 }
 
 //  One expense in a budget response.
@@ -52,4 +64,13 @@ public sealed class ExpenseResponse
         Description = expense.Description,
         Date = expense.Date
     };
-}
+
+    // turns a read-model expense into this response.
+    public static ExpenseResponse From(ExpenseDetails expense) => new()
+    {
+        Id = expense.Id,
+        Amount = expense.Amount,
+        Description = expense.Description,
+        Date = expense.Date
+    };
+}

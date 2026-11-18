@@ -1,7 +1,7 @@
 using BudgetTracker.API.Contracts.Requests;              // CreateBudgetRequest, CreateExpenseRequest
 using BudgetTracker.API.Contracts.Responses;             // BudgetResponse
 using BudgetTracker.Application.Budgets.Commands;        // CreateBudgetCommand, AddExpenseCommand, NewExpense
-using BudgetTracker.Application.Data.Repositories;       // IBudgetRepository (GET only, until Week 8)
+using BudgetTracker.Application.Budgets.Queries;         // GetBudgetByIdQuery, BudgetDetails
 using BudgetTracker.Domain.Budgets;                      // Budget
 using MediatR;                                           // ISender
 using Microsoft.AspNetCore.Mvc;                          // ControllerBase, [ApiController], [HttpPost], [HttpGet]
@@ -12,12 +12,12 @@ namespace BudgetTracker.API.Controllers;
 ///   HTTP endpoints for budgets. Turns HTTP into commands and results back into HTTP. No business rules here.
 /// </summary>
 
-// ISender = MediatR's "send a command" door. The controller doesn't know which handler runs.
-// IBudgetRepository stays only for the GET until Week 8 turns it into a query.
+// ISender = MediatR's door for commands (writes) and queries (reads). The controller doesn't know which handler runs.
+// no repository or DbContext here: every endpoint goes through MediatR.
 // broken rules (DomainException) are turned into 400s by DomainExceptionHandler, so no try/catch here.
 [ApiController]
 [Route("api/[controller]")]
-public sealed class BudgetsController(ISender sender, IBudgetRepository repository) : ControllerBase
+public sealed class BudgetsController(ISender sender) : ControllerBase
 {
     // POST /api/budgets
     [HttpPost]
@@ -42,9 +42,10 @@ public sealed class BudgetsController(ISender sender, IBudgetRepository reposito
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<BudgetResponse>> GetById(Guid id, CancellationToken cancellationToken)
     {
-        // reading doesn't change anything, so it's not a command. Week 8 replaces this with a query.
-        Budget? budget = await repository.Get(id, cancellationToken);
+        // reading doesn't change anything, so it's a query, not a command.
+        BudgetDetails? budget = await sender.Send(new GetBudgetByIdQuery(id), cancellationToken);
 
+        // the handler returns null when no budget has that Id.
         if (budget is null)
             return NotFound();
 

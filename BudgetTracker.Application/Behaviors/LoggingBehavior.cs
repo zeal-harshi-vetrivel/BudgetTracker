@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;               // ILogger
 namespace BudgetTracker.Application.Behaviors;
 
 /// <summary>
-///   Runs around every command: logs when it starts, how long it took, and whether a rule was broken.
+///   Runs around every command and query: logs when it starts, how long it took, and whether a rule was broken.
 /// </summary>
 
 // a pipeline behavior is like a wrapper around the handler.
@@ -20,10 +20,10 @@ public sealed class LoggingBehavior<TRequest, TResponse>(ILogger<LoggingBehavior
         RequestHandlerDelegate<TResponse> next,
         CancellationToken cancellationToken)
     {
-        // the command's class name, e.g. "CreateBudgetCommand"
+        // the command or query class name, e.g. "CreateBudgetCommand" or "GetBudgetByIdQuery"
         string name = typeof(TRequest).Name;
 
-        logger.LogInformation("Handling {Command}", name);
+        logger.LogInformation("Handling {Request}", name);
         Stopwatch timer = Stopwatch.StartNew();
 
         try
@@ -31,13 +31,13 @@ public sealed class LoggingBehavior<TRequest, TResponse>(ILogger<LoggingBehavior
             // run the handler. Everything before this line happens BEFORE the handler, everything after happens AFTER.
             TResponse response = await next();
 
-            logger.LogInformation("Handled {Command} in {Elapsed} ms", name, timer.ElapsedMilliseconds);
+            logger.LogInformation("Handled {Request} in {Elapsed} ms", name, timer.ElapsedMilliseconds);
             return response;
         }
         catch (DomainException ex)
         {
             // a business rule said no. That's expected, so it's a warning, not an error.
-            logger.LogWarning("{Command} rejected after {Elapsed} ms: {Rule} - {Message}",
+            logger.LogWarning("{Request} rejected after {Elapsed} ms: {Rule} - {Message}",
                 name, timer.ElapsedMilliseconds, ex.GetType().Name, ex.Message);
 
             // "throw;" passes the same exception on, so the API still turns it into a 400.
