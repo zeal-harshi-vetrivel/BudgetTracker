@@ -1,112 +1,75 @@
-using BudgetTracker.API.Contracts.Requests;              // CreateBudgetRequest
+using BudgetTracker.API.Contracts.Requests;              // CreateBudgetRequest, CreateExpenseRequest
 using BudgetTracker.API.Contracts.Responses;             // BudgetResponse
-using BudgetTracker.Application.Data.Repositories;       // IBudgetRepository
+using BudgetTracker.Application.Budgets.Commands;        // CreateBudgetCommand, AddExpenseCommand, NewExpense
+using BudgetTracker.Application.Data.Repositories;       // IBudgetRepository (GET only, until Week 8)
 using BudgetTracker.Domain.Budgets;                      // Budget
-using BudgetTracker.Domain.Core;                         // DomainException
+using MediatR;                                           // ISender
 using Microsoft.AspNetCore.Mvc;                          // ControllerBase, [ApiController], [HttpPost], [HttpGet]
 
 namespace BudgetTracker.API.Controllers;
 
 /// <summary>
-///   HTTP endpoints for budgets. Temporary home for this logic until Week 7 moves it into commands.
+///   HTTP endpoints for budgets. Turns HTTP into commands and results back into HTTP. No business rules here.
 /// </summary>
 
-// (IBudgetRepository repository) = ASP.NET hands us a BudgetRepository here,
-// because we registered it in AddDataServices. The controller only knows the interface.
+// ISender = MediatR's "send a command" door. The controller doesn't know which handler runs.
+// IBudgetRepository stays only for the GET until Week 8 turns it into a query.
+// broken rules (DomainException) are turned into 400s by DomainExceptionHandler, so no try/catch here.
 [ApiController]
 [Route("api/[controller]")]
-public sealed class BudgetsController(IBudgetRepository repository) : ControllerBase
+public sealed class BudgetsController(ISender sender, IBudgetRepository repository) : ControllerBase
 {
     // POST /api/budgets
-    // creates a budget, adds any starting expenses, and saves it.
     [HttpPost]
     public async Task<ActionResult<BudgetResponse>> Create(
         [FromBody] CreateBudgetRequest request,
         CancellationToken cancellationToken)
     {
-        Budget budget;
+        // 1. translate the HTTP request into a command (HTTP classes stay in the API).
+        var command = new CreateBudgetCommand(
+            request.Name,
+            request.Limit,
+            request.Expenses.Select(ToNewExpense).ToList());
 
-        try
-        {
-            // let the Domain create the budget. It checks the limit rules.
-            budget = Budget.Create(request.Name, request.Limit);
+        // 2. send it. MediatR runs LoggingBehavior, then CreateBudgetCommandHandler.
+        Budget budget = await sender.Send(command, cancellationToken);
 
-            // add each expense through the Domain. It checks the amount and over-limit rules.
-            foreach (CreateExpenseRequest expense in request.Expenses)
-            {
-                // if the client didn't send a date, use today.
-                DateOnly date = expense.Date ?? DateOnly.FromDateTime(DateTime.Today);
-
-                budget.AddExpense(expense.Amount, expense.Description, date);
-            }
-        }
-        catch (DomainException ex)
-        {
-            // a business rule was broken. Nothing gets saved. Send a standard 400 error body.
-            return Problem(
-                title: ex.GetType().Name,
-                detail: ex.Message,
-                statusCode: StatusCodes.Status400BadRequest);
-        }
-
-        // every rule passed: save it to the database.
-        await repository.Save(budget, cancellationToken);
-
-        // 201 Created + a Location header pointing at GET /api/budgets/{id} + the budget in the body.
+        // 3. translate the result into HTTP: 201 + Location header + the budget.
         return CreatedAtAction(nameof(GetById), new { id = budget.Id }, BudgetResponse.From(budget));
     }
 
     // GET /api/budgets/{id}
-    // loads one saved budget. {id:guid} = only match if the id looks like a Guid.
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<BudgetResponse>> GetById(Guid id, CancellationToken cancellationToken)
     {
-        // ask the repository. It rebuilds the Budget from the database (Spent recalculated).
+        // reading doesn't change anything, so it's not a command. Week 8 replaces this with a query.
         Budget? budget = await repository.Get(id, cancellationToken);
 
-        // no budget with that Id: 404 Not Found.
         if (budget is null)
             return NotFound();
 
         return Ok(BudgetResponse.From(budget));
     }
 
-    
     // POST /api/budgets/{id}/expenses
-    // loads a SAVED budget, adds one expense through the Domain, and saves it again.
     [HttpPost("{id:guid}/expenses")]
     public async Task<ActionResult<BudgetResponse>> AddExpense(
         Guid id,
         [FromBody] CreateExpenseRequest request,
         CancellationToken cancellationToken)
     {
-        // rebuild the budget from the database.
-        Budget? budget = await repository.Get(id, cancellationToken);
+        var command = new AddExpenseCommand(id, ToNewExpense(request));
 
-        // no budget with that Id: 404 Not Found.
+        Budget? budget = await sender.Send(command, cancellationToken);
+
+        // the handler returns null when no budget has that Id.
         if (budget is null)
             return NotFound();
 
-        try
-        {
-            // if the client didn't send a date, use today.
-            DateOnly date = request.Date ?? DateOnly.FromDateTime(DateTime.Today);
-
-            // same Domain method as POST /api/budgets, so the same rules apply to a loaded budget.
-            budget.AddExpense(request.Amount, request.Description, date);
-        }
-        catch (DomainException ex)
-        {
-            // a rule was broken (e.g. over the limit). Nothing gets saved.
-            return Problem(
-                title: ex.GetType().Name,
-                detail: ex.Message,
-                statusCode: StatusCodes.Status400BadRequest);
-        }
-
-        // rules passed: save. The budget already exists, so this takes the "update" path in Save.
-        await repository.Save(budget, cancellationToken);
-
         return Ok(BudgetResponse.From(budget));
     }
+
+    // HTTP expense -> command expense. Keeps the HTTP class out of the Application layer.
+    private static NewExpense ToNewExpense(CreateExpenseRequest expense) =>
+        new(expense.Amount, expense.Description, expense.Date);
 }

@@ -4,6 +4,13 @@
     <ProjectReference Include="..\BudgetTracker.Domain\BudgetTracker.Domain.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 12.5.0 = last free (Apache 2.0) MediatR version; 13+ needs a license key -->
+    <PackageReference Include="MediatR" Version="12.5.0" />
+    <!-- ILogger for LoggingBehavior -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
