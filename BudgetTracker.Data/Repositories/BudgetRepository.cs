@@ -1,4 +1,5 @@
 using BudgetTracker.Application.Data.Repositories;   // IBudgetRepository (the contract we're fulfilling)
+using BudgetTracker.Application.Events;              // IDomainEventCollector
 using BudgetTracker.Data.Entities;                   // BudgetEntity, ExpenseEntity
 using BudgetTracker.Domain.Budgets;                  // Budget, Expense, Money
 using Microsoft.EntityFrameworkCore;                 // Include, FirstOrDefaultAsync
@@ -11,7 +12,8 @@ namespace BudgetTracker.Data.Repositories;
 
 // ": IBudgetRepository" = this class promises to do everything the interface lists.
 // (BudgetTrackerContext db) = EF Core's database connection, handed in at startup.
-internal sealed class BudgetRepository(BudgetTrackerContext db) : IBudgetRepository
+// (IDomainEventCollector events) = where we drop the budget's domain events once they're saved.
+internal sealed class BudgetRepository(BudgetTrackerContext db, IDomainEventCollector events) : IBudgetRepository
 {
     // LOAD: rows -> Domain
     public async Task<Budget?> Get(Guid id, CancellationToken cancellationToken = default)
@@ -73,5 +75,10 @@ internal sealed class BudgetRepository(BudgetTrackerContext db) : IBudgetReposit
 
         // send all the INSERTs/UPDATEs to SQLite in one go.
         await db.SaveChangesAsync(cancellationToken);
+
+        // the save worked, so the budget's events are now true in the database too.
+        // hand them to the collector; DomainEventsBehavior sends them out after the command finishes.
+        // PullDomainEvents is internal to Domain, and we can call it thanks to InternalsVisibleTo.
+        events.Add(budget.PullDomainEvents());
     }
-}
+}

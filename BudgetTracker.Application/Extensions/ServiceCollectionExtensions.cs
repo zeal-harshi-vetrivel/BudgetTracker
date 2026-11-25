@@ -1,4 +1,5 @@
-using BudgetTracker.Application.Behaviors;          // LoggingBehavior
+using BudgetTracker.Application.Behaviors;          // LoggingBehavior, DomainEventsBehavior
+using BudgetTracker.Application.Events;             // IDomainEventCollector, DomainEventCollector
 using Microsoft.Extensions.DependencyInjection;      // IServiceCollection
 
 namespace BudgetTracker.Application.Extensions;
@@ -21,7 +22,13 @@ public static class ServiceCollectionExtensions
 
             // wrap every handler in LoggingBehavior. "<,>" = works for any command and any result type.
             config.AddOpenBehavior(typeof(LoggingBehavior<,>));
+
+            // then DomainEventsBehavior, inside the logging wrapper: sends out events after a command succeeds.
+            config.AddOpenBehavior(typeof(DomainEventsBehavior<,>));
         });
+
+        // one collector per HTTP request, shared by the repository (adds events) and DomainEventsBehavior (sends them).
+        services.AddScoped<IDomainEventCollector, DomainEventCollector>();
 
         return services;
     }

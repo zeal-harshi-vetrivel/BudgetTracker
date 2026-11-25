@@ -41,7 +41,7 @@ Instead of putting everything in one project, the code is split into four projec
 | Project | Its job | Think of it as |
 |---|---|---|
 | `BudgetTracker.API` | Receives HTTP requests and sends back responses | The front desk |
-| `BudgetTracker.Application` | Says *what* the app needs (like "save a budget") without saying *how* | The order form |
+| `BudgetTracker.Application` | Holds the use cases: commands (changes), queries (reads) and event handlers. Says *what* it needs from the database without saying *how* | The coordinator |
 | `BudgetTracker.Domain` | Holds the business rules | The rulebook |
 | `BudgetTracker.Data` | Stores and loads things from the database | The filing cabinet |
 
@@ -67,21 +67,25 @@ Here's what happens when you add a $25 expense to a saved budget:
 You (the .http file in VS Code)
   │   POST /api/budgets/{id}/expenses   { "amount": 25.00, "description": "Trader Joe's" }
   ▼
-API          BudgetsController.AddExpense receives the request
-  │
+API          BudgetsController.AddExpense turns the request into an AddExpenseCommand
+  │          and sends it through MediatR
   ▼
-Data         BudgetRepository.Get reads the budget from SQLite and rebuilds a Budget object
-  │
+Application  LoggingBehavior logs "Handling AddExpenseCommand"
+  │          DomainEventsBehavior waits for the handler to finish
   ▼
-Domain       budget.AddExpense(...) checks the rules
-  │            ✗ rule broken → the controller returns 400 and nothing is saved
-  │            ✓ rules pass  → keep going
+Application  AddExpenseCommandHandler:
+  │            Data:   BudgetRepository.Get rebuilds the Budget from SQLite
+  │            Domain: budget.AddExpense(...) checks the rules
+  │                      ✗ rule broken → DomainException → 400, nothing saved, no event
+  │                      ✓ rules pass  → records an ExpenseAdded domain event
+  │            Data:   BudgetRepository.Save writes to SQLite, then hands over the event
   ▼
-Data         BudgetRepository.Save writes the new expense to SQLite
-  │
+Application  DomainEventsBehavior publishes ExpenseAdded → LogExpenseAddedHandler logs it
   ▼
 API          returns 200 OK with the updated budget as JSON
 ```
+
+Reads take a different, simpler path: `GET` sends a `GetBudgetByIdQuery`, which reads straight from the database into a plain read model without touching the Domain (see [Application layer](#application-layer-use-cases)).
 
 The rest of this README goes through each layer, starting with the Domain because everything else depends on it.
 
@@ -154,19 +158,30 @@ Every rule throws a named exception that inherits from the abstract `DomainExcep
 
 The Domain doesn't know anything about HTTP. It just throws, and the API layer turns the exception into a `400 Bad Request`.
 
+### Domain events
+
+When something meaningful happens, the aggregate records it as a **domain event**: a past-tense fact like `ExpenseAddedDomainEvent` (budget, expense, amount, what's left).
+
+- `Budget.AddExpense` raises it on its **last line**, after every rule has passed. A rejected expense never raises one.
+- `AggregateRoot` keeps pending events in a private list. `AddDomainEvent` is `protected` (only the aggregate can add), and `PullDomainEvents` is `internal` (only Data can collect them, through `InternalsVisibleTo`).
+- The event is plain C#, with no MediatR, HTTP or EF Core. The budget **announces** what happened and doesn't know who is listening. Reactions live in the Application layer.
+
 ### Files
 
 ```
 BudgetTracker.Domain/
 ├── Core/
 │   ├── Entity.cs              Has an Id; equal by Id
-│   ├── AggregateRoot.cs       Entity that owns others; all changes go through it
+│   ├── AggregateRoot.cs       Entity that owns others; holds pending domain events
 │   ├── ValueObject.cs         No Id; equal by value
-│   └── DomainException.cs     Abstract base for every rule violation
+│   ├── DomainException.cs     Abstract base for every rule violation
+│   └── IDomainEvent.cs        Label for "something that happened"
 └── Budgets/
     ├── Budget.cs              Aggregate root: limit, spent, remaining, expenses
     ├── Expense.cs             Entity: amount, description, date
     ├── Money.cs               Value object: never negative, rounded to cents
+    ├── Events/
+    │   └── ExpenseAddedDomainEvent.cs
     └── Exceptions/
         ├── InvalidAmountException.cs
         └── BudgetExceededException.cs
@@ -176,7 +191,7 @@ BudgetTracker.Domain/
 
 ## Presentation layer: talking HTTP
 
-`BudgetTracker.API` turns HTTP requests into calls on the Domain, and turns the results back into HTTP responses. It holds no business rules of its own.
+`BudgetTracker.API` turns HTTP requests into commands and queries, sends them through MediatR, and turns the results back into HTTP responses. It holds no business rules and no business workflow of its own.
 
 ### Startup: `Program.cs`
 
@@ -185,8 +200,10 @@ When the app starts, `Program.cs`:
 1. Turns on controllers (`AddControllers`).
 2. Reads the database connection string from `appsettings.json` (`Data Source=budgettracker.db`).
 3. Registers the Data layer (`AddDataServices`).
-4. Creates or updates the database (`ApplyMigrations`).
-5. Connects the controller routes to real URLs (`MapControllers`).
+4. Registers the Application layer (`AddApplicationServices`): MediatR, the handlers and the pipeline behaviors.
+5. Registers `DomainExceptionHandler` (with `AddProblemDetails`), so broken rules become `400`s in one place.
+6. Creates or updates the database (`ApplyMigrations`).
+7. Turns on the exception handler (`UseExceptionHandler`) and connects the controller routes to real URLs (`MapControllers`).
 
 ### Request and response models
 
@@ -241,11 +258,13 @@ The request is what the client *wants*. The response is what the Domain *accepte
 
 ### The controller
 
-`BudgetsController` has one method per endpoint. Each one does the same three things:
+`BudgetsController` has one method per endpoint, and its only dependency is MediatR's `ISender`. No repository, no `DbContext`. Each method does the same three things:
 
-1. **Translate** the request into Domain calls (`Budget.Create`, `AddExpense`).
-2. **Save or load** through the repository.
+1. **Translate** the request into a command (`CreateBudgetCommand`, `AddExpenseCommand`) or a query (`GetBudgetByIdQuery`).
+2. **Send** it: `await sender.Send(command, cancellationToken)`.
 3. **Translate** the result into a response with the right status code.
+
+The HTTP request classes never leave the API. The controller copies them into the command's own types (like `NewExpense`), so the same command could be sent from a CLI or a background job.
 
 | Status code | Meaning | When you'll see it |
 |---|---|---|
@@ -257,7 +276,7 @@ The request is what the client *wants*. The response is what the Domain *accepte
 **How errors work:**
 
 - **Missing required fields** (like `name`) are caught by ASP.NET's `[ApiController]` before our code even runs.
-- **Broken business rules** throw a `DomainException`. The controller catches it and returns a standard error body called `ProblemDetails` (shortened here):
+- **Broken business rules** throw a `DomainException`. `Errors/DomainExceptionHandler.cs` catches it for every endpoint in one place and returns a standard error body called `ProblemDetails` (shortened here). The controller has no try/catch.
 
 ```json
 {
@@ -278,15 +297,25 @@ BudgetTracker.API/
 ├── BudgetTracker.API.http              Test requests (see "Running it")
 ├── Contracts/
 │   ├── Requests/CreateBudgetRequest.cs
-│   └── Responses/BudgetResponse.cs
-└── Controllers/BudgetsController.cs
+│   └── Responses/BudgetResponse.cs     From(Budget) for commands, From(BudgetDetails) for queries
+├── Controllers/BudgetsController.cs    Request → command/query → Send → response
+└── Errors/DomainExceptionHandler.cs    DomainException → 400 ProblemDetails
 ```
 
 ---
 
-## Application layer: the go-between
+## Application layer: use cases
 
-`BudgetTracker.Application` is small for now. It holds one interface:
+`BudgetTracker.Application` holds the app's use cases. It uses **MediatR**, a small library that delivers a message (a command or query) to the one class that handles it. The controller sends; it never knows which class does the work.
+
+### Commands: changing things (Week 7)
+
+| Command | Handler does |
+|---|---|
+| `CreateBudgetCommand(Name, Limit, Expenses)` | `Budget.Create`, `AddExpense` for each expense, `repository.Save` |
+| `AddExpenseCommand(BudgetId, Expense)` | `repository.Get` (null → 404), `AddExpense`, `repository.Save` |
+
+Commands are plain records with no HTTP types. Handlers work with the full `Budget` aggregate, so every rule runs. They save through `IBudgetRepository`, an interface the Data layer fulfils:
 
 ```csharp
 public interface IBudgetRepository
@@ -296,11 +325,59 @@ public interface IBudgetRepository
 }
 ```
 
-An **interface** is a promise: "something can get and save budgets." The controller depends only on the promise. The Data layer supplies the real class that keeps it.
+### Queries: reading things (Week 8, CQRS)
 
-Why bother? The controller never knows it's talking to SQLite, so the database could be swapped out without touching the controller. It also keeps the arrows pointing inward: Data depends on Application, not the other way around.
+Reading doesn't change anything, so it doesn't need the rules. `GetBudgetByIdQuery` goes down a separate, lighter path:
 
-In Weeks 7–8, this layer will hold commands and queries: the "use cases" that are in the controller today.
+```
+Command → Budget aggregate → rules → IBudgetRepository.Save   (change state)
+Query   → IBudgetQueries   → SQL projection → BudgetDetails   (just return data)
+```
+
+- **`BudgetDetails` / `ExpenseDetails`** are the *read model*: plain records with decimals, no methods.
+- **`IBudgetQueries`** is the read-side interface. It has no `Save`, so a query *can't* change anything.
+- **`GetBudgetByIdQueryHandler`** only calls `IBudgetQueries`. It never touches a `Budget`.
+
+Both sides share one SQLite database. CQRS here means separate *paths*, not separate databases.
+
+### Pipeline behaviors: code that wraps every request
+
+```
+sender.Send(...) → LoggingBehavior → DomainEventsBehavior → handler
+```
+
+- **`LoggingBehavior`** logs `Handling …` and `Handled … in N ms`, and logs a broken rule as a warning before passing the exception on.
+- **`DomainEventsBehavior`** waits for the handler to finish, then publishes the domain events that were saved (below).
+
+### Domain events: reacting without coupling (Week 9)
+
+```
+Budget.AddExpense ─► records ExpenseAddedDomainEvent
+BudgetRepository.Save ─► after SaveChangesAsync, hands the events to IDomainEventCollector
+DomainEventsBehavior ─► after the command succeeds, publishes each event through MediatR
+LogExpenseAddedHandler ─► logs "ExpenseAdded: $25.00 added to 'Groceries' (...). $303.85 left."
+```
+
+- **Events go out after the save.** A handler never reacts to something that didn't make it to the database. For example, in request #2 the $30 expense is accepted inside the budget before the $25 one breaks the limit, but nothing is saved, so no event is sent.
+- **The Domain doesn't reference MediatR.** `DomainEventNotification<TEvent>` wraps the plain event so MediatR can deliver it.
+- **Adding a reaction** (an alert at 90% of the limit, updating a report) means adding another handler. `Budget` doesn't change.
+- Today the reactions run in the same request. If one ever needed to reach another system (email, a message queue), it would be better sent later through a queue, so a slow or failed reaction can't affect the user's request.
+
+### Files
+
+```
+BudgetTracker.Application/
+├── Budgets/
+│   ├── Commands/        CreateBudgetCommand(+Handler), AddExpenseCommand(+Handler), NewExpense
+│   ├── Queries/         GetBudgetByIdQuery(+Handler), BudgetDetails, ExpenseDetails
+│   └── EventHandlers/   LogExpenseAddedHandler
+├── Behaviors/           LoggingBehavior, DomainEventsBehavior
+├── Events/              IDomainEventCollector, DomainEventNotification
+├── Data/
+│   ├── Repositories/IBudgetRepository.cs   write side
+│   └── Queries/IBudgetQueries.cs           read side
+└── Extensions/ServiceCollectionExtensions.cs   AddApplicationServices
+```
 
 ---
 
@@ -334,13 +411,21 @@ This is EF Core's map of the database: which tables exist, their keys, maximum t
 
 `BudgetRepository` keeps the `IBudgetRepository` promise.
 
-**Saving** (Domain → rows): if the budget isn't in the database yet, it adds a new row; otherwise it updates the existing one. Expenses can only be added (never edited or removed), so it only inserts expenses that aren't saved yet. Then it calls `SaveChangesAsync` to send everything to SQLite in one go.
+**Saving** (Domain → rows): if the budget isn't in the database yet, it adds a new row; otherwise it updates the existing one. Expenses can only be added (never edited or removed), so it only inserts expenses that aren't saved yet. Then it calls `SaveChangesAsync` to send everything to SQLite in one go. Once that succeeds, it pulls the budget's pending domain events and hands them to `IDomainEventCollector`.
 
 #### Loading a budget (rehydrating)
 
 **Loading** (rows → Domain) is called *rehydrating*: turning stored data back into a living Domain object. The repository reads the budget row with its expense rows, then rebuilds a `Budget` using its `internal` constructors.
 
 How can Data call an `internal` constructor that lives in another project? The Domain project lists Data in `InternalsVisibleTo`, so Data gets access while the API doesn't. Because constructors don't run the rules, the saved data loads as-is.
+
+### Read queries: `BudgetQueries`
+
+`BudgetQueries` keeps the `IBudgetQueries` promise for the read side:
+
+- **`AsNoTracking()`** tells EF Core "I'm only reading." It skips change tracking, which is faster and means nothing loaded here can be saved by accident.
+- **A `Select` projection** asks SQLite for only the columns the read model needs, and fills `ExpenseDetails` directly. No `Budget` object is built.
+- **`Spent` is added up in C#** after the query, because SQLite stores decimals as text and can't sum them reliably.
 
 ### Migrations
 
@@ -353,7 +438,7 @@ A **migration** is a generated C# file that describes how to create or change th
 `AddDataServices(connectionString)` is the one public entry point into the Data project. It:
 
 - registers `BudgetTrackerContext` and tells it to use SQLite, and
-- says "whenever something asks for `IBudgetRepository`, give it a `BudgetRepository`." This is **dependency injection**: ASP.NET builds the repository and hands it to the controller's constructor.
+- says "whenever something asks for `IBudgetRepository`, give it a `BudgetRepository`" (and the same for `IBudgetQueries` → `BudgetQueries`). This is **dependency injection**: ASP.NET builds these classes and hands them to the handlers' constructors.
 
 Everything else in Data is `internal`.
 
@@ -365,7 +450,8 @@ BudgetTracker.Data/
 ├── Entities/
 │   ├── BudgetEntity.cs
 │   └── ExpenseEntity.cs
-├── Repositories/BudgetRepository.cs
+├── Repositories/BudgetRepository.cs            Write side: Get/Save aggregates
+├── Queries/BudgetQueries.cs                    Read side: AsNoTracking projections
 ├── Extensions/ServiceCollectionExtensions.cs   AddDataServices, ApplyMigrations
 └── Migrations/                                 InitialCreate
 ```
@@ -402,13 +488,22 @@ Open `BudgetTracker.API/BudgetTracker.API.http` and click **Send Request** above
 
 To confirm data really is saved, stop the app (`Ctrl+C`), start it again, and re-send #5.
 
+### What to watch in the terminal
+
+| # | Log lines |
+|---|---|
+| 1 | `Handling CreateBudgetCommand`, two `ExpenseAdded: …` lines, `Handled CreateBudgetCommand` |
+| 2, 3, 8 | `… rejected after N ms: <ExceptionName>`, with **no** `ExpenseAdded` line |
+| 5, 6 | `Handling GetBudgetByIdQuery` / `Handled GetBudgetByIdQuery` (the read path) |
+| 7 | `Handling AddExpenseCommand`, `ExpenseAdded: $25.00 added to 'Groceries' … $303.85 left.`, `Handled …` |
+
 ---
 
 ## Design choices
 
 Where my approach differs from Chris's example repo, I've said so.
 
-- **Overspending is blocked.** An over-limit expense returns 400, and one bad expense fails the whole create request. (Allowing it with a warning could come in Week 9.)
+- **Overspending is blocked.** An over-limit expense returns 400, and one bad expense fails the whole create request. Kept that way so there's a clear rejected rule to show.
 - **Named exceptions** for each rule, following Chris's lecture. His repo throws `DomainException` directly.
 - **Create returns `201` via `CreatedAtAction`.** Chris uses `Created(url)`.
 - **Responses return the whole budget,** so totals are visible when testing. Chris returns only the Id.
@@ -416,12 +511,17 @@ Where my approach differs from Chris's example repo, I've said so.
 - **Separate row classes, manual mapping, and rehydration through internal constructors,** like Chris.
 - **Migrations run at startup,** like Chris.
 - **Expenses are exposed as `IReadOnlyList<Expense>`.** Chris uses snapshot records instead.
-- **`SaveChangesAsync` is in the repository for now.** It moves to a Unit of Work in Week 7.
+- **`SaveChangesAsync` is in the repository.** Chris commits through a Unit of Work behavior. With one aggregate saved per command, I kept it simple and added a `LoggingBehavior` instead (the blueprint allows either).
+- **One global exception handler** (`DomainExceptionHandler`) turns any `DomainException` into a 400. I didn't find one in Chris's repo, where a domain exception would come back as a 500.
+- **Commands return the `Budget`,** so the create/add responses can show totals. Chris's command returns only the Id.
+- **MediatR 12.5.0,** the last free version (Chris uses 12.3.0). Version 13+ needs a license key.
+- **One read interface per aggregate** (`IBudgetQueries`), where Chris has one per query (`IListCharactersDataQuery`). My read returns a finished object, where Chris returns an `IQueryable` for OData.
+- **Domain events, simplified.** A small collector plus `DomainEventsBehavior`, instead of Chris's batching and deferred notifications.
 - **Budget names aren't validated yet.**
 
 ## Open questions
 
-- Should going over budget be **blocked** (current) or **allowed and flagged** (`IsOverBudget`, maybe a `BudgetExceeded` domain event in Week 9)?
+- Should going over budget be **blocked** (current) or **allowed and flagged** (`IsOverBudget` plus a `BudgetExceeded` domain event)?
 - Should one bad expense fail the whole create request, or only that expense?
 
 ---
@@ -435,11 +535,11 @@ Where my approach differs from Chris's example repo, I've said so.
 | 3 | Domain layer | ✅ |
 | 4 | Presentation layer | ✅ |
 | 5 | Data layer | ✅ |
-| 6 | Stabilize | 🟡 In progress |
-| 7 | Commands (MediatR) | ⬜ |
-| 8 | Queries (CQRS) | ⬜ |
-| 9 | Domain events | ⬜ |
-| 10 | Finish and demo | ⬜ |
+| 6 | Stabilize | ✅ |
+| 7 | Commands (MediatR) | ✅ |
+| 8 | Queries (CQRS) | ✅ |
+| 9 | Domain events | ✅ |
+| 10 | Finish and demo | 🟡 Demo Nov 25 |
 
 ### Week 6 checklist
 
@@ -448,11 +548,11 @@ Where my approach differs from Chris's example repo, I've said so.
 - ✅ Valid and invalid requests in the `.http` file
 - ✅ README explains the code and how to run it
 - ⬜ Fresh clone builds and runs in a new folder
-- ⬜ Remove the duplicated `catch (DomainException)` in `BudgetsController`
+- ✅ Remove the duplicated `catch (DomainException)` in `BudgetsController` (replaced by `DomainExceptionHandler` in Week 7)
 
-### Coming up
+### Ideas for later
 
-- **Week 7:** move create and add-expense out of the controller into command handlers (MediatR), and move saving into a Unit of Work.
-- **Week 8:** replace the GET's repository call with a read-only query.
-- **Week 9:** domain events (possibly a `BudgetExceeded` event).
-- **Week 10:** finish and demo.
+- Remove an expense, and list all budgets (a second query).
+- Allow overspending with a flag and a `BudgetExceeded` event.
+- A Unit of Work behavior, if a command ever needs to save more than one aggregate.
+- Validate budget names (`InvalidBudgetNameException`).

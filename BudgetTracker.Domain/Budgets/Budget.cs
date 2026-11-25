@@ -1,3 +1,4 @@
+using BudgetTracker.Domain.Budgets.Events;       // ExpenseAddedDomainEvent
 using BudgetTracker.Domain.Budgets.Exceptions;   // so we can throw our named exceptions
 using BudgetTracker.Domain.Core;                 // so we can inherit from AggregateRoot
 
@@ -94,6 +95,11 @@ public sealed class Budget : AggregateRoot<Guid>
         _expenses.Add(expense);
         Spent = newSpent;
 
+        // the expense is now really part of the budget, so record that it happened.
+        // this line is AFTER every rule, so a rejected expense never raises the event.
+        // the budget doesn't know who (if anyone) is listening.
+        AddDomainEvent(new ExpenseAddedDomainEvent(Id, Name, expense.Id, expenseAmount, Remaining));
+
         return expense;
     }
-}
+}
