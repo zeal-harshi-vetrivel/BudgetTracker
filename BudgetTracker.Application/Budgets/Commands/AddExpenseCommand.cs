@@ -1,5 +1,5 @@
 using BudgetTracker.Domain.Budgets;   // Budget
-using MediatR;                        // IRequest
+using BudgetTracker.Application.Commands;   // CommandBase
 
 namespace BudgetTracker.Application.Budgets.Commands;
 
@@ -7,5 +7,5 @@ namespace BudgetTracker.Application.Budgets.Commands;
 ///   "Add this expense to the saved budget with this Id."
 /// </summary>
 
-// IRequest<Budget?> = you get the updated Budget back, or null if no budget has that Id.
-public sealed record AddExpenseCommand(Guid BudgetId, NewExpense Expense) : IRequest<Budget?>;
+// CommandBase<Budget?> = it's a command (runs in a unit of work); you get the updated Budget back, or null if no budget has that Id.
+public sealed record AddExpenseCommand(Guid BudgetId, NewExpense Expense) : CommandBase<Budget?>;

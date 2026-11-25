@@ -1,5 +1,6 @@
-using BudgetTracker.Data.Entities;    // BudgetEntity, ExpenseEntity
-using Microsoft.EntityFrameworkCore;  // DbContext, DbSet, ModelBuilder
+using BudgetTracker.Application.Data;   // IDataStore
+using BudgetTracker.Data.Entities;       // BudgetEntity, ExpenseEntity
+using Microsoft.EntityFrameworkCore;     // DbContext, DbSet, ModelBuilder
 
 namespace BudgetTracker.Data;
 
@@ -9,13 +10,19 @@ namespace BudgetTracker.Data;
 
 // internal: only the Data project uses this directly.
 // (options) is filled in at startup with "use SQLite, and here's the file". We set that up in Step 7.
+// IDataStore = the context is also what the unit of work calls to write staged changes (like Chris's DnDContext).
 internal sealed class BudgetTrackerContext(DbContextOptions<BudgetTrackerContext> options)
-    : DbContext(options)
+    : DbContext(options), IDataStore
 {
     // each DbSet is one table we can query or add to.
     public DbSet<BudgetEntity> Budgets => Set<BudgetEntity>();
 
     public DbSet<ExpenseEntity> Expenses => Set<ExpenseEntity>();
+
+    // "IDataStore." in front = only callable through the interface, so it doesn't clash with DbContext's own SaveChanges.
+    // sends every staged INSERT/UPDATE to SQLite in one go.
+    async Task IDataStore.SaveChanges(CancellationToken cancellationToken) =>
+        await SaveChangesAsync(cancellationToken);
 
     // runs once when EF builds its picture of the database. This is where table rules go.
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -45,4 +52,4 @@ internal sealed class BudgetTrackerContext(DbContextOptions<BudgetTrackerContext
             entity.Property(e => e.Description).HasMaxLength(200).IsRequired();
         });
     }
-}
+}

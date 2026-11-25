@@ -71,16 +71,18 @@ API          BudgetsController.AddExpense turns the request into an AddExpenseCo
   │          and sends it through MediatR
   ▼
 Application  LoggingBehavior logs "Handling AddExpenseCommand"
-  │          DomainEventsBehavior waits for the handler to finish
+  │          UnitOfWorkBehavior sees a command and waits for the handler to finish
   ▼
 Application  AddExpenseCommandHandler:
   │            Data:   BudgetRepository.Get rebuilds the Budget from SQLite
   │            Domain: budget.AddExpense(...) checks the rules
   │                      ✗ rule broken → DomainException → 400, nothing saved, no event
   │                      ✓ rules pass  → records an ExpenseAdded domain event
-  │            Data:   BudgetRepository.Save writes to SQLite, then hands over the event
+  │            Data:   BudgetRepository.Save stages the change and hands over the event
   ▼
-Application  DomainEventsBehavior publishes ExpenseAdded → LogExpenseAddedHandler logs it
+Application  UnitOfWork.Commit:
+  │            1. publishes ExpenseAdded → LogExpenseAddedHandler logs it
+  │            2. IDataStore.SaveChanges writes everything to SQLite in one go
   ▼
 API          returns 200 OK with the updated budget as JSON
 ```
@@ -343,25 +345,41 @@ Both sides share one SQLite database. CQRS here means separate *paths*, not sepa
 ### Pipeline behaviors: code that wraps every request
 
 ```
-sender.Send(...) → LoggingBehavior → DomainEventsBehavior → handler
+sender.Send(...) → LoggingBehavior → UnitOfWorkBehavior → handler
 ```
 
 - **`LoggingBehavior`** logs `Handling …` and `Handled … in N ms`, and logs a broken rule as a warning before passing the exception on.
-- **`DomainEventsBehavior`** waits for the handler to finish, then publishes the domain events that were saved (below).
+- **`UnitOfWorkBehavior`** runs only for commands (anything that inherits `CommandBase`). After the handler finishes, it calls `IUnitOfWork.Commit` once. Queries pass straight through.
+
+### Unit of Work: one save per command
+
+The repository's `Save` only **stages** changes on EF Core's change tracker. Nothing is written until the command is done:
+
+```
+UnitOfWorkBehavior ─► handler runs (repository.Save stages rows, collects events)
+                   ─► UnitOfWork.Commit:
+                        1. publish every collected domain event (repeat until none are left)
+                        2. IDataStore.SaveChanges  →  one SaveChangesAsync for the whole command
+```
+
+- **A broken rule** throws before `Commit`, so nothing is saved and no events are sent.
+- **`UnitOfWorkBehaviorState.CallLevel`** tracks how many commands deep we are. If a handler ever sends another command, only the outermost one commits, so everything is saved together.
+- **`IDataStore`** is defined in Application and implemented by `BudgetTrackerContext` in Data, so Application never references EF Core.
 
 ### Domain events: reacting without coupling (Week 9)
 
 ```
-Budget.AddExpense ─► records ExpenseAddedDomainEvent
-BudgetRepository.Save ─► after SaveChangesAsync, hands the events to IDomainEventCollector
-DomainEventsBehavior ─► after the command succeeds, publishes each event through MediatR
+Budget.AddExpense ─► records ExpenseAddedDomainEvent (on its last line, after every rule passed)
+BudgetRepository.Save ─► stages the rows, moves the events into IDomainEventCollector
+UnitOfWork.Commit ─► publishes each event through MediatR, THEN calls SaveChanges
 LogExpenseAddedHandler ─► logs "ExpenseAdded: $25.00 added to 'Groceries' (...). $303.85 left."
 ```
 
-- **Events go out after the save.** A handler never reacts to something that didn't make it to the database. For example, in request #2 the $30 expense is accepted inside the budget before the $25 one breaks the limit, but nothing is saved, so no event is sent.
+- **Events are handled inside the unit of work, before the save.** The command's changes and its reactions go to the database together: if a reaction fails, nothing is saved. This follows Chris's design from the Week 9 session (he calls these pre-transaction notifications).
+- **A failed command sends no events.** For example, in request #2 the $30 expense is accepted inside the budget before the $25 one breaks the limit, but the handler throws before `Save`, so no event is collected and nothing is saved.
 - **The Domain doesn't reference MediatR.** `DomainEventNotification<TEvent>` wraps the plain event so MediatR can deliver it.
 - **Adding a reaction** (an alert at 90% of the limit, updating a report) means adding another handler. `Budget` doesn't change.
-- Today the reactions run in the same request. If one ever needed to reach another system (email, a message queue), it would be better sent later through a queue, so a slow or failed reaction can't affect the user's request.
+- **Before or after the save?** Reactions that must succeed with the change (like updating another table) belong before the save, as here. Reactions that talk to the outside world (email, a message queue) should run **after** the save or through a queue, so a slow or failed email can't undo the user's change. Chris calls those deferred notifications. BudgetTracker only needs the first kind for now.
 
 ### Files
 
@@ -371,9 +389,12 @@ BudgetTracker.Application/
 │   ├── Commands/        CreateBudgetCommand(+Handler), AddExpenseCommand(+Handler), NewExpense
 │   ├── Queries/         GetBudgetByIdQuery(+Handler), BudgetDetails, ExpenseDetails
 │   └── EventHandlers/   LogExpenseAddedHandler
-├── Behaviors/           LoggingBehavior, DomainEventsBehavior
+├── Commands/CommandBase.cs   Base for commands (so the unit of work knows to commit)
+├── Behaviors/           LoggingBehavior, UnitOfWorkBehavior (+ UnitOfWorkBehaviorState)
+├── UnitOfWorks/         IUnitOfWork, UnitOfWork (dispatch events, then save)
 ├── Events/              IDomainEventCollector, DomainEventNotification
 ├── Data/
+│   ├── IDataStore.cs                        "save the staged changes"
 │   ├── Repositories/IBudgetRepository.cs   write side
 │   └── Queries/IBudgetQueries.cs           read side
 └── Extensions/ServiceCollectionExtensions.cs   AddApplicationServices
@@ -411,7 +432,7 @@ This is EF Core's map of the database: which tables exist, their keys, maximum t
 
 `BudgetRepository` keeps the `IBudgetRepository` promise.
 
-**Saving** (Domain → rows): if the budget isn't in the database yet, it adds a new row; otherwise it updates the existing one. Expenses can only be added (never edited or removed), so it only inserts expenses that aren't saved yet. Then it calls `SaveChangesAsync` to send everything to SQLite in one go. Once that succeeds, it pulls the budget's pending domain events and hands them to `IDomainEventCollector`.
+**Saving** (Domain → rows): if the budget isn't in the database yet, it adds a new row; otherwise it updates the existing one. Expenses can only be added (never edited or removed), so it only inserts expenses that aren't saved yet. It does **not** call `SaveChangesAsync`: it only stages the rows, then pulls the budget's pending domain events and hands them to `IDomainEventCollector`. The unit of work saves once at the end of the command, through `IDataStore`, which `BudgetTrackerContext` implements.
 
 #### Loading a budget (rehydrating)
 
@@ -492,10 +513,10 @@ To confirm data really is saved, stop the app (`Ctrl+C`), start it again, and re
 
 | # | Log lines |
 |---|---|
-| 1 | `Handling CreateBudgetCommand`, two `ExpenseAdded: …` lines, `Handled CreateBudgetCommand` |
+| 1 | `Handling CreateBudgetCommand`, two `ExpenseAdded: …` lines, then the `INSERT` SQL, then `Handled CreateBudgetCommand` |
 | 2, 3, 8 | `… rejected after N ms: <ExceptionName>`, with **no** `ExpenseAdded` line |
 | 5, 6 | `Handling GetBudgetByIdQuery` / `Handled GetBudgetByIdQuery` (the read path) |
-| 7 | `Handling AddExpenseCommand`, `ExpenseAdded: $25.00 added to 'Groceries' … $303.85 left.`, `Handled …` |
+| 7 | `Handling AddExpenseCommand`, `ExpenseAdded: $25.00 added to 'Groceries' … $303.85 left.`, then the `INSERT`, then `Handled …` |
 
 ---
 
@@ -511,12 +532,12 @@ Where my approach differs from Chris's example repo, I've said so.
 - **Separate row classes, manual mapping, and rehydration through internal constructors,** like Chris.
 - **Migrations run at startup,** like Chris.
 - **Expenses are exposed as `IReadOnlyList<Expense>`.** Chris uses snapshot records instead.
-- **`SaveChangesAsync` is in the repository.** Chris commits through a Unit of Work behavior. With one aggregate saved per command, I kept it simple and added a `LoggingBehavior` instead (the blueprint allows either).
+- **Unit of Work like Chris's** (`UnitOfWorkBehavior`, `UnitOfWorkBehaviorState`, `IUnitOfWork`, `IDataStore`, `CommandBase`), without his batched and deferred notifications. I added a `LoggingBehavior` as well.
 - **One global exception handler** (`DomainExceptionHandler`) turns any `DomainException` into a 400. I didn't find one in Chris's repo, where a domain exception would come back as a 500.
 - **Commands return the `Budget`,** so the create/add responses can show totals. Chris's command returns only the Id.
 - **MediatR 12.5.0,** the last free version (Chris uses 12.3.0). Version 13+ needs a license key.
 - **One read interface per aggregate** (`IBudgetQueries`), where Chris has one per query (`IListCharactersDataQuery`). My read returns a finished object, where Chris returns an `IQueryable` for OData.
-- **Domain events, simplified.** A small collector plus `DomainEventsBehavior`, instead of Chris's batching and deferred notifications.
+- **Domain events, simplified.** A small collector and the same "dispatch, then save" order as Chris, without his batching attributes.
 - **Budget names aren't validated yet.**
 
 ## Open questions
@@ -554,5 +575,5 @@ Where my approach differs from Chris's example repo, I've said so.
 
 - Remove an expense, and list all budgets (a second query).
 - Allow overspending with a flag and a `BudgetExceeded` event.
-- A Unit of Work behavior, if a command ever needs to save more than one aggregate.
+- Deferred (after-save) notifications for reactions that reach outside systems.
 - Validate budget names (`InvalidBudgetNameException`).

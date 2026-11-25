@@ -3,10 +3,10 @@ using BudgetTracker.Domain.Core;   // IDomainEvent
 namespace BudgetTracker.Application.Events;
 
 /// <summary>
-///   Holds domain events from aggregates that were saved during this request, until they're sent out.
+///   Holds domain events from aggregates saved (staged) during this request, until they're sent out.
 /// </summary>
 
-// the repository puts events in (after saving), DomainEventsBehavior takes them out (after the command).
+// the repository puts events in (when it stages a save), the unit of work takes them out (at commit).
 // one collector per HTTP request (registered as Scoped), so requests never mix events.
 public interface IDomainEventCollector
 {

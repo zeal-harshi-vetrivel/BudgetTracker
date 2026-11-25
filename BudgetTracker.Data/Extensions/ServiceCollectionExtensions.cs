@@ -1,3 +1,4 @@
+using BudgetTracker.Application.Data;               // IDataStore
 using BudgetTracker.Application.Data.Queries;       // IBudgetQueries
 using BudgetTracker.Application.Data.Repositories;   // IBudgetRepository
 using BudgetTracker.Data.Queries;                    // BudgetQueries
@@ -27,6 +28,9 @@ public static class ServiceCollectionExtensions
 
         // read side: whenever something asks for IBudgetQueries, create a BudgetQueries.
         services.AddScoped<IBudgetQueries, BudgetQueries>();
+
+        // IDataStore = the SAME DbContext the repository staged changes on, so SaveChanges writes them.
+        services.AddScoped<IDataStore>(provider => provider.GetRequiredService<BudgetTrackerContext>());
 
         return services;
     }

@@ -12,7 +12,7 @@ namespace BudgetTracker.Data.Repositories;
 
 // ": IBudgetRepository" = this class promises to do everything the interface lists.
 // (BudgetTrackerContext db) = EF Core's database connection, handed in at startup.
-// (IDomainEventCollector events) = where we drop the budget's domain events once they're saved.
+// (IDomainEventCollector events) = where we drop the budget's domain events for the unit of work.
 internal sealed class BudgetRepository(BudgetTrackerContext db, IDomainEventCollector events) : IBudgetRepository
 {
     // LOAD: rows -> Domain
@@ -36,12 +36,16 @@ internal sealed class BudgetRepository(BudgetTrackerContext db, IDomainEventColl
     }
 
     // SAVE: Domain -> rows (insert if new, update if it already exists)
+    // this only STAGES the changes. Nothing is written until the unit of work commits
+    // (UnitOfWork.Commit -> IDataStore.SaveChanges), as Chris showed in the Nov 11 session.
     public async Task Save(Budget budget, CancellationToken cancellationToken = default)
     {
-        // is this budget already in the database?
-        BudgetEntity? entity = await db.Budgets
-            .Include(b => b.Expenses)
-            .FirstOrDefaultAsync(b => b.BudgetId == budget.Id, cancellationToken);
+        // is this budget already staged in this request (Local = rows EF is already tracking)?
+        // if not, is it in the database?
+        BudgetEntity? entity = db.Budgets.Local.FirstOrDefault(b => b.BudgetId == budget.Id)
+            ?? await db.Budgets
+                .Include(b => b.Expenses)
+                .FirstOrDefaultAsync(b => b.BudgetId == budget.Id, cancellationToken);
 
         // not there yet: make a new row and tell EF to INSERT it.
         if (entity is null)
@@ -73,11 +77,10 @@ internal sealed class BudgetRepository(BudgetTrackerContext db, IDomainEventColl
             });
         }
 
-        // send all the INSERTs/UPDATEs to SQLite in one go.
-        await db.SaveChangesAsync(cancellationToken);
+        // no SaveChangesAsync here: the unit of work saves everything once, at the end of the command.
 
-        // the save worked, so the budget's events are now true in the database too.
-        // hand them to the collector; DomainEventsBehavior sends them out after the command finishes.
+        // move the budget's events into the request-wide collector.
+        // the unit of work sends them out, then saves (Chris's Nov 18 flow).
         // PullDomainEvents is internal to Domain, and we can call it thanks to InternalsVisibleTo.
         events.Add(budget.PullDomainEvents());
     }

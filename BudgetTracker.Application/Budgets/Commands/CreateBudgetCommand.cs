@@ -1,5 +1,5 @@
 using BudgetTracker.Domain.Budgets;   // Budget
-using MediatR;                        // IRequest
+using BudgetTracker.Application.Commands;   // CommandBase
 
 namespace BudgetTracker.Application.Budgets.Commands;
 
@@ -7,12 +7,12 @@ namespace BudgetTracker.Application.Budgets.Commands;
 ///   "Create a new budget, with these starting expenses." Just data, no logic.
 /// </summary>
 
-// IRequest<Budget> = when this command is handled, you get the new Budget back.
+// CommandBase<Budget> = it's a command (so it runs in a unit of work), and when it's handled you get the new Budget back.
 // it uses plain C# types only (no HTTP request classes), so a CLI or background job could send it too.
 public sealed record CreateBudgetCommand(
     string Name,
     decimal Limit,
-    IReadOnlyList<NewExpense> Expenses) : IRequest<Budget>;
+    IReadOnlyList<NewExpense> Expenses) : CommandBase<Budget>;
 
 /// <summary>
 ///   One expense to add. Used by CreateBudgetCommand and AddExpenseCommand.
